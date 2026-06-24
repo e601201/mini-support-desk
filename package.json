@@ -1,6 +1,7 @@
 {
   "name": "mini-support-desk",
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "blocksTemplate": "react",
   "engines": {

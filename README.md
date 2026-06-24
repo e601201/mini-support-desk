@@ -123,3 +123,7 @@ npm run destroy          # 本番リソースを破棄
 - ブロックの詳細ドキュメントは `node_modules/@aws-blocks/blocks/README.md`、各ブロックは `node_modules/@aws-blocks/blocks/docs/<package-name>.md` を参照してください。
 
 エージェント向けの補足は [`AGENTS.md`](./AGENTS.md) にあります。
+
+## ライセンス
+
+[MIT License](./LICENSE) © 2026 Daichi Nagata
