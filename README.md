@@ -1,6 +1,7 @@
 # Mini Support Desk
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)
 
 [AWS Blocks](https://www.npmjs.com/package/@aws-blocks/blocks) をベースにした、React + AWS サーバーレスのスターターアプリです。
 認証・ユーザーごとのデータ分離・楽観的ロック・タブ間のリアルタイム同期を備えた Todo 機能をサンプルとして実装しています。
