@@ -2,6 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)
+![React](https://img.shields.io/badge/React-19-61DAFB.svg?logo=react&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-8-646CFF.svg?logo=vite&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6.svg?logo=typescript&logoColor=white)
 
 [AWS Blocks](https://www.npmjs.com/package/@aws-blocks/blocks) をベースにした、React + AWS サーバーレスのスターターアプリです。
 認証・ユーザーごとのデータ分離・楽観的ロック・タブ間のリアルタイム同期を備えた Todo 機能をサンプルとして実装しています。
