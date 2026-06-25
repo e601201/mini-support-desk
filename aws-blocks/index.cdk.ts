@@ -20,19 +20,19 @@ export const blocksStack = await BlocksStack.create(app, stackName, {
 });
 
 if (sandboxMode) {
-  // Make all resources deletable so sandbox:destroy can clean up the entire stack.
-  // This overrides removal policies and deletion protection (e.g. RDS) for every
-  // resource in the stack, including any you add below.
-  // Remove these lines if you want to manage teardown behavior yourself.
+  // すべてのリソースを削除可能にして、sandbox:destroy がスタック全体を
+  // クリーンアップできるようにする。これは以下で追加するものを含め、スタック内の
+  // すべてのリソースの削除ポリシーと削除保護(例: RDS)を上書きする。
+  // teardown の挙動を自分で管理したい場合は、これらの行を削除すること。
   RemovalPolicies.of(blocksStack).destroy();
   Mixins.of(blocksStack).apply(new SandboxDisableDeletionProtection());
 
-  // Tell the runtime that cookies need cross-domain attributes (frontend on
-  // localhost, API on API Gateway — different registrable domains).
+  // Cookie にクロスドメイン属性が必要であることをランタイムに伝える(フロントエンドは
+  // localhost、API は API Gateway — 登録可能ドメインが異なるため)。
   blocksStack.handler.addEnvironment('BLOCKS_SANDBOX', 'true');
 }
 
-// Add static site hosting only when deploying (not in sandbox mode)
+// デプロイ時のみ静的サイトホスティングを追加する(サンドボックスモードでは追加しない)
 if (!sandboxMode) {
   new Hosting(blocksStack, 'Hosting', {
     root: join(__dirname, '..'),

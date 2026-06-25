@@ -1,17 +1,17 @@
 /**
- * Backend — aws-blocks/index.ts
+ * バックエンド — aws-blocks/index.ts
  *
- * Real-time todo app with per-user isolation, optimistic locking, and secondary indexes.
+ * ユーザーごとの分離、楽観的ロック、セカンダリインデックスを備えたリアルタイムTodoアプリ。
  *
- * This file defines your API, auth, data model, and real-time channels.
- * The frontend imports these exports directly via `import { ... } from 'aws-blocks'`.
+ * このファイルはAPI、認証、データモデル、リアルタイムチャネルを定義します。
+ * フロントエンドは `import { ... } from 'aws-blocks'` で、これらのエクスポートを直接インポートします。
  *
- * ─── IMPORTANT ───────────────────────────────────────────────────────────────
- * Do NOT use local files, in-memory arrays, or local databases for persistence.
- * Use Building Blocks for cloud persistence and other common cloud abstractions.
- * They work locally with automatic mocks and deploy to AWS with zero configuration.
+ * ─── 重要 ─────────────────────────────────────────────────────────────────────
+ * 永続化のためにローカルファイル、メモリ上の配列、ローカルデータベースを使用しないでください。
+ * クラウドの永続化やその他の一般的なクラウド抽象化には Building Blocks を使用してください。
+ * これらはローカルでは自動モックで動作し、設定不要でAWSにデプロイできます。
  *
- * For the full list of blocks and how to use them, see:
+ * ブロックの全一覧と使い方については、以下を参照してください:
  *   node_modules/@aws-blocks/blocks/README.md
  * ─────────────────────────────────────────────────────────────────────────────
  */
@@ -20,22 +20,22 @@ import { z } from 'zod';
 
 const scope = new Scope('my-app');
 
-// ─── Auth ────────────────────────────────────────────────────────────────────
+// ─── 認証 ─────────────────────────────────────────────────────────────────────
 const auth = new AuthBasic(scope, 'auth', {
   passwordPolicy: { minLength: 8 },
   crossDomain: process.env.BLOCKS_SANDBOX === 'true',
 });
 export const authApi = auth.createApi();
 
-// ─── Data ────────────────────────────────────────────────────────────────────
-// Zod schema = runtime validation + TypeScript types + DynamoDB table shape.
+// ─── データ ───────────────────────────────────────────────────────────────────
+// Zodスキーマ = ランタイムバリデーション + TypeScriptの型 + DynamoDBテーブルの形状。
 const todoSchema = z.object({
-  userId: z.string(),       // partition key — per-user isolation
-  todoId: z.string(),       // sort key — unique within a user
+  userId: z.string(),       // パーティションキー — ユーザーごとの分離
+  todoId: z.string(),       // ソートキー — ユーザー内で一意
   title: z.string(),
   completed: z.boolean(),
-  priority: z.number(),     // 1=high, 2=medium, 3=low
-  version: z.number(),      // optimistic locking — incremented on each update
+  priority: z.number(),     // 1=高, 2=中, 3=低
+  version: z.number(),      // 楽観的ロック — 更新のたびにインクリメント
   createdAt: z.number(),
 });
 
@@ -43,14 +43,14 @@ const todos = new DistributedTable(scope, 'todos', {
   schema: todoSchema,
   key: { partitionKey: 'userId', sortKey: 'todoId' },
   indexes: {
-    // Secondary indexes: query todos sorted by priority or title.
-    // The partition key is always userId (per-user isolation), the sort key varies.
+    // セカンダリインデックス: priorityまたはtitleでソートしてTodoをクエリする。
+    // パーティションキーは常にuserId(ユーザーごとの分離)で、ソートキーは可変。
     byPriority: { partitionKey: 'userId', sortKey: 'priority' },
     byTitle: { partitionKey: 'userId', sortKey: 'title' },
   },
 });
 
-// ─── Realtime ────────────────────────────────────────────────────────────────
+// ─── リアルタイム ─────────────────────────────────────────────────────────────
 const rt = new Realtime(scope, 'live', {
   namespaces: {
     todos: Realtime.namespace(z.object({
@@ -60,7 +60,7 @@ const rt = new Realtime(scope, 'live', {
   },
 });
 
-// ─── API ─────────────────────────────────────────────────────────────────────
+// ─── API ──────────────────────────────────────────────────────────────────────
 export const api = new ApiNamespace(scope, 'api', (context) => ({
 
   async subscribeTodos() {
@@ -85,7 +85,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     return todo;
   },
 
-  /** List todos, optionally sorted by a secondary index. */
+  /** Todoの一覧を取得する。任意でセカンダリインデックスによりソートできる。 */
   async listTodos(sortBy?: 'priority' | 'title') {
     const user = await auth.requireAuth(context);
     if (sortBy) {
@@ -94,16 +94,16 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
         todos.query({ index, where: { userId: { equals: user.username } } })
       );
     }
-    // Default: sorted by todoId (creation order)
+    // デフォルト: todoId順(作成順)でソート
     return await Array.fromAsync(
       todos.query({ where: { userId: { equals: user.username } } })
     );
   },
 
   /**
-   * Toggle todo completion with optimistic locking.
-   * Uses `ifFieldEquals` to detect concurrent writes. On conflict,
-   * throws ConditionalCheckFailedException — caller should re-read and retry.
+   * 楽観的ロックを用いてTodoの完了状態を切り替える。
+   * `ifFieldEquals` を使って同時書き込みを検出する。競合した場合は
+   * ConditionalCheckFailedException をスローする — 呼び出し側は再読み込みしてリトライすること。
    */
   async toggleTodo(todoId: string) {
     const user = await auth.requireAuth(context);
@@ -117,7 +117,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     return { success: true };
   },
 
-  /** Update a todo's priority with optimistic locking. */
+  /** 楽観的ロックを用いてTodoのpriorityを更新する。 */
   async updatePriority(todoId: string, priority: number) {
     const user = await auth.requireAuth(context);
     const todo = await todos.get({ userId: user.username, todoId });
@@ -130,7 +130,7 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     return { success: true };
   },
 
-  /** Delete a todo. Broadcasts 'deleted' to all connected clients. */
+  /** Todoを削除する。接続中の全クライアントに 'deleted' をブロードキャストする。 */
   async deleteTodo(todoId: string) {
     const user = await auth.requireAuth(context);
     await todos.delete({ userId: user.username, todoId });
