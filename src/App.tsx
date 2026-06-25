@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, type ChangeEvent } from 'react';
 import { api, authApi } from 'aws-blocks';
 import { AccountMenuBar, onAuthChange } from '@aws-blocks/blocks/ui';
 
@@ -8,6 +8,165 @@ import { AccountMenuBar, onAuthChange } from '@aws-blocks/blocks/ui';
 type Todo = { todoId: string; title: string; completed: boolean; priority: number; version: number };
 type User = { username: string; userId: string };
 type SortBy = 'priority' | 'title' | undefined;
+
+// Ticket row type, kept in sync with the backend automatically.
+type Ticket = Awaited<ReturnType<typeof api.listTickets>>[number];
+
+// ─── Support desk (tickets) ───────────────────────────────────────────────────
+
+const STATUS_COLORS: Record<string, string> = {
+  open: '#2563eb',
+  triage_required: '#d97706',
+  in_progress: '#7c3aed',
+  closed: '#6b7280',
+};
+
+function StatusBadge({ status }: { status: string }) {
+  return (
+    <span style={{
+      fontSize: '0.7em', fontWeight: 600, color: '#fff', padding: '2px 8px',
+      borderRadius: 10, background: STATUS_COLORS[status] ?? '#6b7280',
+      textTransform: 'uppercase', letterSpacing: 0.3, whiteSpace: 'nowrap',
+    }}>
+      {status.replace('_', ' ')}
+    </span>
+  );
+}
+
+function SupportDesk() {
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [me, setMe] = useState<{ sub: string; email: string } | null>(null);
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [priority, setPriority] = useState<'normal' | 'high'>('normal');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [upload, setUpload] = useState('');
+  const [attachment, setAttachment] = useState<{ key: string; url: string } | null>(null);
+
+  const load = useCallback(async () => {
+    try { setTickets(await api.listTickets()); }
+    catch (e: any) { setError(e.message); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { api.whoami().then(setMe).catch(() => {}); }, []);
+
+  const create = async () => {
+    if (!title.trim()) return;
+    setBusy(true); setError('');
+    try {
+      await api.createTicket(title.trim(), body.trim(), priority);
+      setTitle(''); setBody(''); setPriority('normal');
+      await load();
+    } catch (e: any) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const close = async (id: string) => {
+    setError('');
+    try { await api.closeTicket(id); await load(); }
+    catch (e: any) { setError(e.message); }
+  };
+
+  // Exercises the FileBucket end-to-end: presigned PUT, then a presigned GET.
+  const onPickFile = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setAttachment(null);
+    setUpload(`Uploading ${file.name}…`);
+    try {
+      const { key, url } = await api.getAttachmentUploadUrl(file.name);
+      const res = await fetch(url, { method: 'PUT', body: file });
+      if (!res.ok) throw new Error(`PUT ${res.status}`);
+      const { url: downloadUrl } = await api.getAttachmentDownloadUrl(key);
+      setAttachment({ key, url: downloadUrl });
+      setUpload(`Uploaded ✓`);
+    } catch (err: any) {
+      setUpload(`Upload failed: ${err.message}`);
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+        <h2 style={{ marginBottom: 4 }}>🎫 Support tickets</h2>
+        <button onClick={load} style={{ fontSize: '0.8em' }}>Refresh</button>
+      </div>
+      {me && (
+        <p style={{ color: '#888', fontSize: '0.82em', marginTop: 0 }}>
+          Signed in as <strong>{me.email}</strong> · <code>{me.sub.slice(0, 8)}…</code>
+        </p>
+      )}
+
+      {/* Create form */}
+      <div style={{ border: '1px solid #eee', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+        <input
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          placeholder="Ticket title"
+          style={{ width: '100%', boxSizing: 'border-box', margin: 0 }}
+        />
+        <textarea
+          value={body}
+          onChange={e => setBody(e.target.value)}
+          placeholder="Describe the issue…"
+          rows={3}
+          style={{ width: '100%', boxSizing: 'border-box', marginTop: 6, fontFamily: 'inherit' }}
+        />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' }}>
+          <select value={priority} onChange={e => setPriority(e.target.value as 'normal' | 'high')}>
+            <option value="normal">🟢 Normal</option>
+            <option value="high">🔴 High</option>
+          </select>
+          <button onClick={create} disabled={busy || !title.trim()}>
+            {busy ? 'Creating…' : 'Create ticket'}
+          </button>
+          <label style={{ fontSize: '0.85em', color: '#666' }}>
+            📎 Attachment demo: <input type="file" onChange={onPickFile} style={{ fontSize: '0.85em' }} />
+          </label>
+        </div>
+        {upload && (
+          <p style={{ fontSize: '0.8em', color: '#555', margin: '8px 0 0' }}>
+            {upload}
+            {attachment && (
+              <> — <a href={attachment.url} target="_blank" rel="noreferrer">download</a>{' '}
+                <code style={{ color: '#aaa' }}>{attachment.key}</code></>
+            )}
+          </p>
+        )}
+        {error && <p style={{ color: '#c00', fontSize: '0.85em', margin: '8px 0 0' }}>⚠ {error}</p>}
+      </div>
+
+      {/* List */}
+      {tickets.length === 0 && <p style={{ color: '#999' }}>No tickets yet — create one above.</p>}
+      <ul style={{ listStyle: 'none', padding: 0 }}>
+        {tickets.map(t => (
+          <li key={t.id} style={{
+            border: '1px solid #eee', borderRadius: 8, padding: '10px 12px',
+            margin: '8px 0', opacity: t.status === 'closed' ? 0.6 : 1,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <StatusBadge status={t.status} />
+              <span style={{ fontWeight: 600, flex: 1 }}>{t.title}</span>
+              {t.priority === 'high' && <span title="high priority">🔴</span>}
+              {t.status !== 'closed' && <button onClick={() => close(t.id)}>Close</button>}
+            </div>
+            {t.body && (
+              <p style={{ margin: '6px 0 0', color: '#555', fontSize: '0.9em', whiteSpace: 'pre-wrap' }}>{t.body}</p>
+            )}
+            <p style={{ margin: '6px 0 0', color: '#aaa', fontSize: '0.75em' }}>
+              #{t.id} · {new Date(t.created_at).toLocaleString()}
+            </p>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ─── Todos (original starter demo) ────────────────────────────────────────────
 
 function TodoApp() {
   const [todos, setTodos] = useState<Todo[]>([]);
@@ -121,15 +280,23 @@ export function App() {
   return (
     <div>
       <div ref={menuRef} />
-      <h1>Blocks App</h1>
+      <h1>Mini Support Desk</h1>
       <p style={{ color: '#666', fontSize: '0.9em', lineHeight: 1.5, marginBottom: 24 }}>
-        This starter app demonstrates:
-        {' '}<strong>authentication</strong> with cross-tab coordination,
-        {' '}<strong>real-time sync</strong> across browser tabs,
-        and <strong>todos stored in a distributed table</strong> with secondary index queries.
+        Sign up (a confirmation code is printed to the dev-server terminal), then create
+        support tickets backed by <strong>Cognito auth</strong>, a <strong>SQL database</strong>,
+        and <strong>file attachments</strong>. The original todo demo is kept below.
       </p>
       {!user && <p>Sign in to get started.</p>}
-      {user && <TodoApp />}
+      {user && (
+        <>
+          <SupportDesk />
+          <hr style={{ margin: '32px 0', border: 0, borderTop: '1px solid #eee' }} />
+          <details>
+            <summary style={{ cursor: 'pointer', color: '#666' }}>Todos (original starter demo)</summary>
+            <div style={{ marginTop: 12 }}><TodoApp /></div>
+          </details>
+        </>
+      )}
     </div>
   );
 }

@@ -15,16 +15,41 @@
  *   node_modules/@aws-blocks/blocks/README.md
  * ─────────────────────────────────────────────────────────────────────────────
  */
-import { ApiNamespace, Scope, AuthBasic, DistributedTable, Realtime } from '@aws-blocks/blocks';
+import { ApiNamespace, Scope, DistributedTable, Realtime, AuthCognito, Database, sql, FileBucket, Logger, Metrics, Dashboard } from '@aws-blocks/blocks';
 import { z } from 'zod';
 
-const scope = new Scope('my-app');
+type TicketStatus = 'open' | 'triage_required' | 'in_progress' | 'closed';
+type TicketPriority = 'normal' | 'high';
+
+type Ticket = {
+  id: string;
+  owner_sub: string;
+  title: string;
+  body: string;
+  status: TicketStatus;
+  priority: TicketPriority;
+  attachment_key: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+const scope = new Scope('mini-support-desk');
+
+const db = new Database(scope, 'main', {
+  migrationsPath: './aws-blocks/migrations',
+});
 
 // ─── 認証 ─────────────────────────────────────────────────────────────────────
-const auth = new AuthBasic(scope, 'auth', {
+const auth = new AuthCognito(scope, 'auth', {
   passwordPolicy: { minLength: 8 },
-  crossDomain: process.env.BLOCKS_SANDBOX === 'true',
+  signInWith: 'email',
+  // ローカルモック専用: 確認コードをターミナルに出力する
+  codeDelivery: async (username, code) => {
+    console.log(`[auth] ${username} の確認コード: ${code}`);
+  },
 });
+
+// サインアップ／サインインの状態遷移をフロントに公開する
 export const authApi = auth.createApi();
 
 // ─── データ ───────────────────────────────────────────────────────────────────
@@ -60,8 +85,26 @@ const rt = new Realtime(scope, 'live', {
   },
 });
 
+const newId = () => `t_${Date.now().toString(36)}${Math.floor(performance.now()).toString(36)}`;
+
+const attachments = new FileBucket(scope, 'attachments');
+
+const log = new Logger(scope, 'log');
+const metrics = new Metrics(scope, 'metrics');
+
+const dashboard = new Dashboard(scope, 'dashboard', {
+  logger: log,
+  metrics,
+  metricConfigs: [{ name: 'RequestCreated', stat: 'Sum' }],
+});
+
 // ─── API ──────────────────────────────────────────────────────────────────────
 export const api = new ApiNamespace(scope, 'api', (context) => ({
+
+  async whoami() {
+    const user = await auth.requireAuth(context);
+    return { sub: user.userSub, email: user.username };
+  },
 
   async subscribeTodos() {
     const user = await auth.requireAuth(context);
@@ -142,4 +185,63 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     const user = await auth.requireAuth(context);
     return `Hello, ${user.username}! I'm Daichi.`;
   },
+
+  async createTicket(title: string, body: string, priority: TicketPriority = 'normal') {
+    const user = await auth.requireAuth(context);
+    const id = newId();
+    await db.execute(sql`
+      INSERT INTO tickets (id, owner_sub, title, body, priority)
+      VALUES (${id}, ${user.userSub}, ${title}, ${body}, ${priority})
+    `);
+    metrics.emit('RequestCreated', 1, { unit: 'Count' });  // カスタムメトリクス
+    log.info('ticket created', { id, priority });          // 構造化ログ
+    return await db.queryOne<Ticket>(sql`SELECT * FROM tickets WHERE id = ${id}`);
+  },
+
+  async listTickets() {
+    const user = await auth.requireAuth(context);
+    return await db.query<Ticket>(
+      sql`SELECT * FROM tickets WHERE owner_sub = ${user.userSub} ORDER BY created_at DESC`
+    );
+  },
+
+  async getTicket(id: string) {
+    const user = await auth.requireAuth(context);
+    return await db.queryOne<Ticket>(
+      sql`SELECT * FROM tickets WHERE id = ${id} AND owner_sub = ${user.userSub}`
+    );
+  },
+
+  async closeTicket(id: string) {
+    const user = await auth.requireAuth(context);
+    await db.execute(
+      sql`UPDATE tickets SET status = 'closed', updated_at = now()
+          WHERE id = ${id} AND owner_sub = ${user.userSub}`
+    );
+    return { ok: true };
+  },
+
+  async getAttachmentUploadUrl(filename: string) {
+    const user = await auth.requireAuth(context);
+    // キーにユーザーごとのプレフィックスを付け、特殊文字は encode する
+    const key = `${user.userSub}/${Date.now()}-${encodeURIComponent(filename)}`;
+    const url = await attachments.putUrl(key, { expiresIn: 600 });
+    return { key, url };
+  },
+
+  async getAttachmentDownloadUrl(key: string) {
+    await auth.requireAuth(context);
+    return { url: await attachments.getUrl(key, { expiresIn: 600 }) };
+  },
+
+  // 責務境界を意識した安全な発行例（key を直接信用しない）
+  async getTicketAttachmentUrl(ticketId: string) {
+    const user = await auth.requireAuth(context);
+    const ticket = await db.queryOne<Ticket>(
+      sql`SELECT * FROM tickets WHERE id = ${ticketId} AND owner_sub = ${user.userSub}`
+    );
+    if (!ticket?.attachment_key) return { url: null };
+    return { url: await attachments.getUrl(ticket.attachment_key, { expiresIn: 600 }) };
+  },
+
 }));

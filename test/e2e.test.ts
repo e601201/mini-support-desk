@@ -17,6 +17,8 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { setTimeout } from 'node:timers/promises';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { installCookieJar, isServerRunning } from '@aws-blocks/blocks/utils';
 import type { api as ApiType, authApi as AuthApiType } from 'aws-blocks';
 
@@ -65,6 +67,40 @@ test.after(() => {
   }
 });
 
+// ─── Auth helpers (Cognito) ───────────────────────────────────────────────────
+// AuthCognito requires email confirmation on sign-up. The local mock delivers the
+// code via the `codeDelivery` hook and also writes it to last-code.json — we read
+// it there to drive the flow programmatically.
+const TEST_USER = 'testuser@example.com';
+const TEST_PASS = 'TestPass123!';
+const AUTH_CODE_PATH = join(process.cwd(), '.bb-data', 'mini-support-desk-auth', 'last-code.json');
+
+async function readConfirmationCode(username: string): Promise<string> {
+  for (let i = 0; i < 25; i++) {
+    try {
+      const { username: u, code } = JSON.parse(await readFile(AUTH_CODE_PATH, 'utf8'));
+      if (u === username && code) return code;
+    } catch { /* file not written yet */ }
+    await setTimeout(200);
+  }
+  throw new Error(`No confirmation code delivered for ${username}`);
+}
+
+// Idempotent: signs an existing/confirmed user straight in; otherwise runs the
+// full sign-up → confirm → auto-sign-in chain. Safe to call across re-runs.
+async function ensureSignedIn(username: string, password: string) {
+  try {
+    const s = await authApi.setAuthState({ action: 'signIn', username, password });
+    if (s.state === 'signedIn') return s;
+  } catch { /* user does not exist yet — fall through to sign-up */ }
+
+  await authApi.setAuthState({ action: 'signUp', username, password });
+  const code = await readConfirmationCode(username);
+  await authApi.setAuthState({ action: 'confirmSignUp', username, code });
+  // autoSignIn completes the COMPLETE_AUTO_SIGN_IN bridge → signedIn
+  return await authApi.setAuthState({ action: 'autoSignIn', username });
+}
+
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
 test('auth: starts signed out', async () => {
@@ -72,14 +108,10 @@ test('auth: starts signed out', async () => {
   assert.strictEqual(state.state, 'signedOut');
 });
 
-test('auth: sign up creates account and signs in', async () => {
-  const state = await authApi.setAuthState({
-    action: 'signUp',
-    username: 'testuser@example.com',
-    password: 'TestPass123!',
-  });
+test('auth: sign up + confirm (Cognito) signs in', async () => {
+  const state = await ensureSignedIn(TEST_USER, TEST_PASS);
   assert.strictEqual(state.state, 'signedIn');
-  assert.strictEqual(state.user?.username, 'testuser@example.com');
+  assert.strictEqual(state.user?.username, TEST_USER);
 });
 
 test('auth: unauthenticated access is rejected', async () => {
@@ -92,11 +124,7 @@ test('auth: unauthenticated access is rejected', async () => {
   );
 
   // Sign back in for remaining tests
-  await authApi.setAuthState({
-    action: 'signIn',
-    username: 'testuser@example.com',
-    password: 'TestPass123!',
-  });
+  await ensureSignedIn(TEST_USER, TEST_PASS);
 });
 
 // ─── CRUD ─────────────────────────────────────────────────────────────────────
@@ -179,6 +207,82 @@ test('todos: concurrent toggle → conflict → retry succeeds', async () => {
 
   // Cleanup
   await api.deleteTodo(todo.todoId);
+});
+
+// ─── Tickets (staged: AuthCognito + Database + FileBucket) ─────────────────────
+// Exercises the newly added ticket API against the local mock (embedded Postgres
+// for Database, in-memory FileBucket). Each test signs in via the shared helper.
+
+test('tickets: create returns an open ticket', async () => {
+  await ensureSignedIn(TEST_USER, TEST_PASS);
+  const t = await api.createTicket('Printer broken', 'Smoke is coming out', 'high');
+  assert.ok(t?.id, 'should return a row with an id');
+  assert.strictEqual(t?.title, 'Printer broken');
+  assert.strictEqual(t?.status, 'open');       // DB default
+  assert.strictEqual(t?.priority, 'high');
+  assert.strictEqual(t?.attachment_key, null);
+});
+
+test('tickets: whoami matches the ticket owner', async () => {
+  const me = await api.whoami();
+  assert.strictEqual(me.email, TEST_USER);
+  assert.ok(me.sub);
+  const t = await api.createTicket('Owner check', 'body');
+  assert.strictEqual(t?.owner_sub, me.sub);     // owner_sub == Cognito userSub
+});
+
+test('tickets: list returns only own tickets, newest first', async () => {
+  const me = await api.whoami();
+  const list = await api.listTickets();
+  assert.ok(list.length >= 1);
+  assert.ok(list.every(t => t.owner_sub === me.sub), 'only own tickets');
+  // ORDER BY created_at DESC
+  for (let i = 1; i < list.length; i++) {
+    assert.ok(
+      new Date(list[i - 1].created_at).getTime() >= new Date(list[i].created_at).getTime(),
+      'should be newest first',
+    );
+  }
+});
+
+test('tickets: get a single ticket by id', async () => {
+  const created = await api.createTicket('Fetch me', 'detail', 'normal');
+  const got = await api.getTicket(created!.id);
+  assert.strictEqual(got?.id, created!.id);
+  assert.strictEqual(got?.title, 'Fetch me');
+  assert.strictEqual(got?.priority, 'normal');
+});
+
+test('tickets: close sets status to closed', async () => {
+  const created = await api.createTicket('Close me', 'detail');
+  const res = await api.closeTicket(created!.id);
+  assert.deepStrictEqual(res, { ok: true });
+  const got = await api.getTicket(created!.id);
+  assert.strictEqual(got?.status, 'closed');
+});
+
+test('tickets: attachment upload url is namespaced + presigned', async () => {
+  const me = await api.whoami();
+  const { key, url } = await api.getAttachmentUploadUrl('my photo.png');
+  assert.ok(key.startsWith(`${me.sub}/`), 'key is prefixed with the owner sub');
+  assert.ok(key.includes('my%20photo.png'), 'filename is URL-encoded');
+  assert.match(url, /^https?:\/\//);
+});
+
+test('tickets: ticket without an attachment yields a null url', async () => {
+  const created = await api.createTicket('No file', 'detail');
+  const { url } = await api.getTicketAttachmentUrl(created!.id);
+  assert.strictEqual(url, null);
+});
+
+test('tickets: unauthenticated access is rejected', async () => {
+  await authApi.setAuthState({ action: 'signOut' });
+  await assert.rejects(
+    () => api.listTickets(),
+    (err: any) => /Auth|Session|401|NotAuthenticated/i.test(err.message),
+  );
+  // Restore signed-in state for any later tests
+  await ensureSignedIn(TEST_USER, TEST_PASS);
 });
 
 // ─── Realtime ─────────────────────────────────────────────────────────────────
