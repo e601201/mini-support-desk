@@ -42,7 +42,7 @@ function SupportDesk() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [upload, setUpload] = useState('');
-  const [attachment, setAttachment] = useState<{ key: string; url: string } | null>(null);
+  const [attachment, setAttachment] = useState<{ key: string; name: string } | null>(null);
 
   const load = useCallback(async () => {
     try { setTickets(await api.listTickets()); }
@@ -56,8 +56,9 @@ function SupportDesk() {
     if (!title.trim()) return;
     setBusy(true); setError('');
     try {
-      await api.createTicket(title.trim(), body.trim(), priority);
+      await api.createTicket(title.trim(), body.trim(), priority, attachment?.key);
       setTitle(''); setBody(''); setPriority('normal');
+      setAttachment(null); setUpload('');
       await load();
     } catch (e: any) { setError(e.message); }
     finally { setBusy(false); }
@@ -69,7 +70,7 @@ function SupportDesk() {
     catch (e: any) { setError(e.message); }
   };
 
-  // Exercises the FileBucket end-to-end: presigned PUT, then a presigned GET.
+  // Presigned PUT でアップロードし、キーは createTicket でチケットに紐付ける。
   const onPickFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -80,12 +81,21 @@ function SupportDesk() {
       const { key, url } = await api.getAttachmentUploadUrl(file.name);
       const res = await fetch(url, { method: 'PUT', body: file });
       if (!res.ok) throw new Error(`PUT ${res.status}`);
-      const { url: downloadUrl } = await api.getAttachmentDownloadUrl(key);
-      setAttachment({ key, url: downloadUrl });
-      setUpload(`Uploaded ✓`);
+      setAttachment({ key, name: file.name });
+      setUpload('Uploaded ✓ — will be attached on create');
     } catch (err: any) {
       setUpload(`Upload failed: ${err.message}`);
     }
+  };
+
+  // key ではなく ticketId を渡し、所有者チェックを通った場合のみ期限付き URL が返る。
+  const download = async (ticketId: string) => {
+    setError('');
+    try {
+      const { url } = await api.getTicketAttachmentUrl(ticketId);
+      if (!url) { setError('No attachment on this ticket.'); return; }
+      window.open(url, '_blank', 'noopener,noreferrer');
+    } catch (e: any) { setError(e.message); }
   };
 
   return (
@@ -124,16 +134,13 @@ function SupportDesk() {
             {busy ? 'Creating…' : 'Create ticket'}
           </button>
           <label style={{ fontSize: '0.85em', color: '#666' }}>
-            📎 Attachment demo: <input type="file" onChange={onPickFile} style={{ fontSize: '0.85em' }} />
+            📎 Attachment: <input type="file" onChange={onPickFile} style={{ fontSize: '0.85em' }} />
           </label>
         </div>
         {upload && (
           <p style={{ fontSize: '0.8em', color: '#555', margin: '8px 0 0' }}>
             {upload}
-            {attachment && (
-              <> — <a href={attachment.url} target="_blank" rel="noreferrer">download</a>{' '}
-                <code style={{ color: '#aaa' }}>{attachment.key}</code></>
-            )}
+            {attachment && <> — 📎 <code style={{ color: '#aaa' }}>{attachment.name}</code></>}
           </p>
         )}
         {error && <p style={{ color: '#c00', fontSize: '0.85em', margin: '8px 0 0' }}>⚠ {error}</p>}
@@ -151,6 +158,9 @@ function SupportDesk() {
               <StatusBadge status={t.status} />
               <span style={{ fontWeight: 600, flex: 1 }}>{t.title}</span>
               {t.priority === 'high' && <span title="high priority">🔴</span>}
+              {t.attachment_key && (
+                <button onClick={() => download(t.id)} title="Download attachment">📎 Download</button>
+              )}
               {t.status !== 'closed' && <button onClick={() => close(t.id)}>Close</button>}
             </div>
             {t.body && (

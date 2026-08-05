@@ -186,12 +186,16 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
     return `Hello, ${user.username}! I'm Daichi.`;
   },
 
-  async createTicket(title: string, body: string, priority: TicketPriority = 'normal') {
+  async createTicket(title: string, body: string, priority: TicketPriority = 'normal', attachmentKey?: string) {
     const user = await auth.requireAuth(context);
+    // key を直接信用せず、自分の名前空間（sub プレフィックス）のキーのみ紐付けを許可する
+    if (attachmentKey && !attachmentKey.startsWith(`${user.userSub}/`)) {
+      throw new Error('Invalid attachment key');
+    }
     const id = newId();
     await db.execute(sql`
-      INSERT INTO tickets (id, owner_sub, title, body, priority)
-      VALUES (${id}, ${user.userSub}, ${title}, ${body}, ${priority})
+      INSERT INTO tickets (id, owner_sub, title, body, priority, attachment_key)
+      VALUES (${id}, ${user.userSub}, ${title}, ${body}, ${priority}, ${attachmentKey ?? null})
     `);
     metrics.emit('RequestCreated', 1, { unit: 'Count' });  // カスタムメトリクス
     log.info('ticket created', { id, priority });          // 構造化ログ

@@ -275,6 +275,49 @@ test('tickets: ticket without an attachment yields a null url', async () => {
   assert.strictEqual(url, null);
 });
 
+test('tickets: uploaded file is attached and downloadable via getTicketAttachmentUrl', async () => {
+  // Upload via presigned PUT, then link the key at ticket creation
+  const content = `attachment body ${Date.now()}`;
+  const { key, url: putUrl } = await api.getAttachmentUploadUrl('report.txt');
+  const put = await fetch(putUrl, { method: 'PUT', body: content });
+  assert.ok(put.ok, `PUT failed: ${put.status}`);
+
+  const created = await api.createTicket('With file', 'see attachment', 'normal', key);
+  assert.strictEqual(created?.attachment_key, key);
+
+  // Owner gets a presigned GET url that serves the uploaded bytes
+  const { url } = await api.getTicketAttachmentUrl(created!.id);
+  assert.ok(url, 'owner should receive a presigned url');
+  const got = await fetch(url!);
+  assert.ok(got.ok, `GET failed: ${got.status}`);
+  assert.strictEqual(await got.text(), content);
+});
+
+test('tickets: createTicket rejects an attachment key outside own namespace', async () => {
+  await assert.rejects(
+    () => api.createTicket('Sneaky', 'body', 'normal', 'someone-elses-sub/secret.txt'),
+    (err: any) => /Invalid attachment key/i.test(err.message),
+  );
+});
+
+test("tickets: attachment url is not issued for another user's ticket", async () => {
+  // Owner creates a ticket with an attachment
+  const { key, url: putUrl } = await api.getAttachmentUploadUrl('private.txt');
+  const put = await fetch(putUrl, { method: 'PUT', body: 'secret' });
+  assert.ok(put.ok, `PUT failed: ${put.status}`);
+  const created = await api.createTicket('Private file', 'body', 'normal', key);
+
+  // A different signed-in user gets url: null for the same ticket id
+  await authApi.setAuthState({ action: 'signOut' });
+  await ensureSignedIn('testuser2@example.com', TEST_PASS);
+  const { url } = await api.getTicketAttachmentUrl(created!.id);
+  assert.strictEqual(url, null);
+
+  // Restore the primary user for later tests
+  await authApi.setAuthState({ action: 'signOut' });
+  await ensureSignedIn(TEST_USER, TEST_PASS);
+});
+
 test('tickets: unauthenticated access is rejected', async () => {
   await authApi.setAuthState({ action: 'signOut' });
   await assert.rejects(
