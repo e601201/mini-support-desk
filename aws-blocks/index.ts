@@ -15,7 +15,7 @@
  *   node_modules/@aws-blocks/blocks/README.md
  * ─────────────────────────────────────────────────────────────────────────────
  */
-import { ApiNamespace, Scope, DistributedTable, Realtime, AuthCognito, Database, sql, FileBucket, Logger, Metrics, Dashboard } from '@aws-blocks/blocks';
+import { ApiNamespace, Scope, DistributedTable, Realtime, AuthCognito, Database, sql, FileBucket, Logger, Metrics, Dashboard, EmailClient, AsyncJob, CronJob } from '@aws-blocks/blocks';
 import { z } from 'zod';
 
 type TicketStatus = 'open' | 'triage_required' | 'in_progress' | 'closed';
@@ -85,7 +85,52 @@ const rt = new Realtime(scope, 'live', {
   },
 });
 
+// ─── メール ───────────────────────────────────────────────────────────────────
+const email = new EmailClient(scope, 'mail', {
+  fromAddress: 'support@example.com',
+});
+
+const { messageId } = await email.send({
+  to: 'support@example.com',
+  subject: '件名',
+  body: '本文',
+});
+
+// ─── 非同期ジョブ ─────────────────────────────────────────────────────────────
+new CronJob(scope, 'open-ticket-report', {
+  schedule: 'rate(1 minute)',
+  timezone: 'Asia/Tokyo',
+  handler: async (event) => {
+    const row = await db.queryOne<{ count: string }>(
+      sql`SELECT count(*)::text AS count FROM tickets WHERE status = 'open'`
+    );
+    log.info('open ticket report', { open: row?.count, at: event.scheduledTime });
+    await email.send({
+      to: 'support@example.com',
+      subject: 'open チケット数レポート',
+      body: `現在の open チケット数: ${row?.count}`,
+    });
+  },
+});
+
 const newId = () => `t_${Date.now().toString(36)}${Math.floor(performance.now()).toString(36)}`;
+
+const ticketCreatedJob = new AsyncJob(scope, 'ticket-created', {
+  handler: async (payload: { ticketId: string; title: string }, ctx) => {
+    // 通知履歴を記録
+    await db.execute(sql`
+      INSERT INTO notification_logs (id, ticket_id, type, status)
+      VALUES (${newId()}, ${payload.ticketId}, 'ticket_created', 'sent')
+    `);
+    // メール通知
+    await email.send({
+      to: 'support@example.com',
+      subject: `新しい問い合わせ: ${payload.title}`,
+      body: `チケット ${payload.ticketId} が作成されました。`,
+    });
+    log.info('notification sent', { ticketId: payload.ticketId, jobId: ctx.jobId });
+  },
+});
 
 const attachments = new FileBucket(scope, 'attachments');
 
@@ -198,7 +243,8 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
       VALUES (${id}, ${user.userSub}, ${title}, ${body}, ${priority}, ${attachmentKey ?? null})
     `);
     metrics.emit('RequestCreated', 1, { unit: 'Count' });  // カスタムメトリクス
-    log.info('ticket created', { id, priority });          // 構造化ログ
+    const { jobId } = await ticketCreatedJob.submit({ ticketId: id, title }); // 非同期ジョブの発行
+    log.info('ticket created', { id, priority, jobId });          // 構造化ログ
     return await db.queryOne<Ticket>(sql`SELECT * FROM tickets WHERE id = ${id}`);
   },
 
